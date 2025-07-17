@@ -13,7 +13,6 @@ from torch.cuda.amp import GradScaler, autocast
 import time
 import os
 
-# RNA二级结构特征提取器
 class RNAStructureFeatureExtractor:
     @staticmethod
     def extract_basic_features(structure):
@@ -115,7 +114,6 @@ class RNADataset(Dataset):
         structural = self.structural_features[idx]
 
         if self.training and random.random() < 0.5:
-            # 数据增强
             ohnd = ohnd + np.random.normal(0, 0.01, size=ohnd.shape).astype(np.float32)
             mask = np.random.rand(*structural.shape) < 0.1
             structural = structural * (1 - mask.astype(np.float32))
@@ -394,7 +392,6 @@ class CreateModel(nn.Module):
 
 def train_model_for_fold(model, train_loader, val_loader, criterion, optimizer, device,
                          num_epochs=50, patience=5, min_delta=0.001, fold_idx=0, output_dir='models'):
-    """训练单个折的模型"""
     best_acc = 0.0
     best_metrics = {}
     no_improve_epochs = 0
@@ -459,8 +456,7 @@ def train_model_for_fold(model, train_loader, val_loader, criterion, optimizer, 
               f'Val Acc: {val_acc:.4f} (Best: {best_acc:.4f}) | '
               f'SN: {val_sn:.4f} | SP: {val_sp:.4f} | '
               f'F1: {val_f1:.4f} | MCC: {val_mcc:.4f} | '
-              f'AUROC: {val_auroc:.4f} | '
-              f'Patience: {no_improve_epochs}/{patience}')
+              f'AUROC: {val_auroc:.4f}')
         
         if val_acc > best_acc + min_delta:
             best_acc = val_acc
@@ -540,9 +536,9 @@ if __name__ == '__main__':
         'batch_size': 128,
         'lr': 0.001,
         'num_epochs': 30,
-        'patience': 15,
-        'n_splits': 5,  # 5折交叉验证
-        'output_dir': 'seq_fold/models/combined',
+        'patience': 5,
+        'n_splits': 5, 
+        'output_dir': 'seq_fold/models/',
         'test_size': 0.2
     }
     
