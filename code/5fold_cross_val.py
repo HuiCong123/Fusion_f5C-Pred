@@ -12,14 +12,6 @@ import random
 from torch.cuda.amp import GradScaler, autocast
 import time
 import os
-    
-# 设置随机种子
-SEED = 34
-torch.manual_seed(SEED)
-np.random.seed(SEED)
-random.seed(SEED)
-if torch.cuda.is_available():
-    torch.cuda.manual_seed_all(SEED)
 
 # RNA二级结构特征提取器
 class RNAStructureFeatureExtractor:
@@ -71,15 +63,14 @@ class RNAStructureFeatureExtractor:
 
 class RNADataset(Dataset):
     def __init__(self, pos_ohnd_file, pos_struct_file, neg_ohnd_file, neg_struct_file):
-        # 加载OH+ND特征
+        # 加载seq特征
         pos_ohnd = pd.read_csv(pos_ohnd_file).iloc[:, 1:206].values.astype(np.float32)
         neg_ohnd = pd.read_csv(neg_ohnd_file).iloc[:, 1:206].values.astype(np.float32)
         
-        # 加载结构特征
+        # 加载structural特征
         pos_struct_df = pd.read_csv(pos_struct_file)
         neg_struct_df = pd.read_csv(neg_struct_file)
 
-        # 提取二级结构特征
         pos_struct_features = np.array([
             list(RNAStructureFeatureExtractor.extract_all_features(s).values())
             for s in pos_struct_df['secondary_structure']
@@ -90,15 +81,12 @@ class RNADataset(Dataset):
             for s in neg_struct_df['secondary_structure']
         ], dtype=np.float32)
         
-        # 提取其他数值特征
         pos_other_features = pos_struct_df.drop(['sequence', 'secondary_structure'], axis=1).values.astype(np.float32)
         neg_other_features = neg_struct_df.drop(['sequence', 'secondary_structure'], axis=1).values.astype(np.float32)
 
-        # 合并结构特征
         pos_struct = np.hstack([pos_other_features, pos_struct_features])
         neg_struct = np.hstack([neg_other_features, neg_struct_features])
 
-        # 合并正负样本
         self.ohnd_features = np.vstack([pos_ohnd, neg_ohnd])
         self.structural_features = np.vstack([pos_struct, neg_struct])
         self.labels = np.concatenate([np.ones(len(pos_ohnd)), np.zeros(len(neg_ohnd))])
@@ -106,10 +94,6 @@ class RNADataset(Dataset):
         # 特征标准化
         self.scaler = StandardScaler()
         self.structural_features = self.scaler.fit_transform(self.structural_features)
-        
-        # 打印特征维度信息
-        print(f"OHND特征维度: {self.ohnd_features.shape}")
-        print(f"结构特征维度: {self.structural_features.shape}")
 
         self._shuffle_data()
         self.training = False
@@ -149,17 +133,15 @@ def collate_fn(batch):
     return ohnd, structural, labels
 
 def create_cv_loaders(dataset, batch_size=256, n_splits=5, test_size=0.2):
-    """创建交叉验证数据加载器（包含独立测试集）"""
-    # 首先划分独立测试集
+    """创建交叉验证数据加载器"""
     indices = np.arange(len(dataset))
     train_idx, test_idx = train_test_split(
         indices, 
         test_size=test_size,
         stratify=dataset.labels,
-        random_state=SEED
+        random_state=34
     )
     
-    # 创建测试集loader
     test_subset = Subset(dataset, test_idx)
     test_subset.dataset.set_training_mode(False)
     test_loader = DataLoader(
@@ -169,12 +151,10 @@ def create_cv_loaders(dataset, batch_size=256, n_splits=5, test_size=0.2):
         collate_fn=collate_fn
     )
     
-    # 在训练集上创建交叉验证
     kfold = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=SEED)
     cv_loaders = []
     
     for fold_idx, (train_fold_idx, val_fold_idx) in enumerate(kfold.split(train_idx, dataset.labels[train_idx])):
-        # 训练集 - 使用train_idx中的对应索引
         train_subset = Subset(dataset, train_idx[train_fold_idx])
         train_subset.dataset.set_training_mode(True)
         
@@ -187,7 +167,6 @@ def create_cv_loaders(dataset, batch_size=256, n_splits=5, test_size=0.2):
             pin_memory=True
         )
         
-        # 验证集 - 使用train_idx中的对应索引
         val_subset = Subset(dataset, train_idx[val_fold_idx])
         val_subset.dataset.set_training_mode(False)
         
@@ -204,7 +183,8 @@ def create_cv_loaders(dataset, batch_size=256, n_splits=5, test_size=0.2):
     
     return cv_loaders, test_loader
 
-# 模型组件（保持不变）
+
+# Model
 class ConvFactory(nn.Module):
     def __init__(self, in_channels, out_channels, dropout_rate):
         super().__init__()
@@ -319,19 +299,17 @@ class StructuralTransformer(nn.Module):
         x = x.flatten(1)
         return self.classifier(x)
 
-# 主模型
 class CreateModel(nn.Module):
     def __init__(self, input_channels=5, structural_features=18,
                  denseblocks=4, layers=3, filters=96, growth_rate=32, 
                  dropout_rate=0.4):
         super().__init__()
         
-        # 序列特征分支
+        # seq特征分支
         self.initial_conv = nn.Conv1d(input_channels, filters, kernel_size=3, padding=1, bias=False)
         self.bn = nn.BatchNorm1d(filters)
         self.relu = nn.ReLU(inplace=True)
         
-        # 稠密块
         self.denseblocks = nn.ModuleList()
         self.transitions = nn.ModuleList()
         for i in range(denseblocks - 1):
@@ -343,11 +321,10 @@ class CreateModel(nn.Module):
         self.denseblocks.append(DenseBlock(filters, layers, growth_rate, dropout_rate))
         filters += layers * growth_rate
         
-        # 注意力机制
         self.cbam = CBAM(filters)
         self.avg_pool = nn.AdaptiveAvgPool1d(1)
         
-        # 结构特征分支
+        # structural特征分支
         self.structural_transformer = StructuralTransformer(
             input_dim=structural_features,
             embed_dim=64,
@@ -355,7 +332,7 @@ class CreateModel(nn.Module):
             num_layers=2,
             dropout=dropout_rate)
         
-        # 特征融合
+        # 1.GFN fusion
         self.gate = nn.Sequential(
             nn.Linear(filters + 32, 256),
             nn.GELU(),
@@ -363,7 +340,7 @@ class CreateModel(nn.Module):
             nn.Sigmoid())
         
 
-        # 可学习的加权融合
+        # 2.可学习的加权融合
         self.structural_proj = nn.Linear(32, filters)  # 将结构特征投影到与序列特征相同维度
         self.alpha = nn.Parameter(torch.tensor(0.5))
 
@@ -383,7 +360,6 @@ class CreateModel(nn.Module):
             
     
     def forward(self, x_sequence, x_structural):
-        # 序列特征处理
         x_sequence = self.initial_conv(x_sequence)
         x_sequence = self.bn(x_sequence)
         x_sequence = self.relu(x_sequence)
@@ -396,30 +372,28 @@ class CreateModel(nn.Module):
         x_sequence = self.cbam(x_sequence)
         x_sequence = self.avg_pool(x_sequence).squeeze(-1)
 
-        # 结构特征处理
         structural_features = self.structural_transformer(x_structural)
         
-        # # 1.特征融合
+        # # 1
         # combined = torch.cat([x_sequence, structural_features], dim=1)
         # gate = self.gate(combined)
         # gated_sequence = x_sequence * gate
         # final_feature = torch.cat([gated_sequence, structural_features], dim=1)
 
-        # 2.替换门控融合为简单连接
+        # 2
         final_feature = torch.cat([x_sequence, structural_features], dim=1)
 
-        # # 3.使用可学习的权重进行加权融合
+        # # 3
         # structural_features = self.structural_proj(structural_features)  # 投影到 [batch, filters]
         # final_feature = self.alpha * x_sequence + (1 - self.alpha) * structural_features
         # final_feature = self.final_dropout(final_feature)
         # return self.classifier1(final_feature)
 
-        # 在分类器前添加dropout
         final_feature = self.final_dropout(final_feature)
         return self.classifier(final_feature)
 
 def train_model_for_fold(model, train_loader, val_loader, criterion, optimizer, device,
-                         num_epochs=100, patience=10, min_delta=0.001, fold_idx=0, output_dir='models'):
+                         num_epochs=50, patience=5, min_delta=0.001, fold_idx=0, output_dir='models'):
     """训练单个折的模型"""
     best_acc = 0.0
     best_metrics = {}
@@ -435,7 +409,6 @@ def train_model_for_fold(model, train_loader, val_loader, criterion, optimizer, 
         'val_auroc': []
     }
     
-    # 创建输出目录
     os.makedirs(output_dir, exist_ok=True)
     model_path = os.path.join(output_dir, f'fold{fold_idx+1}.pth')
     
@@ -443,13 +416,12 @@ def train_model_for_fold(model, train_loader, val_loader, criterion, optimizer, 
     start_time = time.time()
     
     for epoch in range(num_epochs):
-        # 训练阶段
         model.train()
         running_loss = 0.0
         correct = 0
         total = 0
     
-        for ohnd, structural, labels in train_loader:  # 修改这里接收三个值
+        for ohnd, structural, labels in train_loader:
             ohnd = ohnd.to(device)
             structural = structural.to(device)
             labels = labels.to(device)
@@ -457,7 +429,7 @@ def train_model_for_fold(model, train_loader, val_loader, criterion, optimizer, 
             optimizer.zero_grad()
             
             with autocast():
-                outputs = model(ohnd, structural)  # 传入两个特征
+                outputs = model(ohnd, structural)
                 loss = criterion(outputs, labels)
             
             scaler.scale(loss).backward()
@@ -469,13 +441,11 @@ def train_model_for_fold(model, train_loader, val_loader, criterion, optimizer, 
             total += labels.size(0)
             correct += (predicted == labels).sum().item()
         
-        # 计算训练指标
         epoch_loss = running_loss / total
         epoch_acc = correct / total
         history['train_loss'].append(epoch_loss)
         history['train_acc'].append(epoch_acc)
         
-        # 验证阶段
         val_sn, val_sp, val_acc, val_f1, val_mcc, val_auroc = evaluate_model(model, val_loader, device, verbose=False)
         history['val_sn'].append(val_sn)
         history['val_sp'].append(val_sp)
@@ -484,7 +454,6 @@ def train_model_for_fold(model, train_loader, val_loader, criterion, optimizer, 
         history['val_mcc'].append(val_mcc)
         history['val_auroc'].append(val_auroc)
         
-        # 打印进度
         print(f'Fold {fold_idx} | Epoch {epoch+1}/{num_epochs} - '
               f'Train Loss: {epoch_loss:.4f} | Train Acc: {epoch_acc:.4f} | '
               f'Val Acc: {val_acc:.4f} (Best: {best_acc:.4f}) | '
@@ -493,7 +462,6 @@ def train_model_for_fold(model, train_loader, val_loader, criterion, optimizer, 
               f'AUROC: {val_auroc:.4f} | '
               f'Patience: {no_improve_epochs}/{patience}')
         
-        # 早停逻辑
         if val_acc > best_acc + min_delta:
             best_acc = val_acc
             torch.save(model.state_dict(), model_path)
@@ -505,14 +473,11 @@ def train_model_for_fold(model, train_loader, val_loader, criterion, optimizer, 
                 print(f'Early stopping at epoch {epoch+1} for fold {fold_idx}')
                 break
     
-    # 加载最佳模型
     model.load_state_dict(torch.load(model_path))
     
-    # 最终验证
     print(f"\nFinal Validation Results for Fold {fold_idx}:")
     sn, sp, acc, f1, mcc, auroc = evaluate_model(model, val_loader, device)
     
-    # 返回时打包为字典
     final_metrics = {
         'sn': sn,
         'sp': sp,
@@ -534,13 +499,13 @@ def evaluate_model(model, data_loader, device, verbose=True):
     all_labels = []
 
     with torch.no_grad():
-        for ohnd, structural, labels in data_loader:  # 修改这里接收三个值
+        for ohnd, structural, labels in data_loader:
             ohnd = ohnd.to(device)
             structural = structural.to(device)
             labels = labels.to(device)
             
-            outputs = model(ohnd, structural)  # 传入两个特征
-            probs = torch.softmax(outputs, dim=1)[:, 1].cpu().numpy()  # 计算正类的概率
+            outputs = model(ohnd, structural)
+            probs = torch.softmax(outputs, dim=1)[:, 1].cpu().numpy()
             _, preds = torch.max(outputs, 1)
             
             all_probs.extend(probs)
@@ -564,9 +529,9 @@ def evaluate_model(model, data_loader, device, verbose=True):
     
     return sn, sp, acc, f1, mcc, auroc
 
-# 主程序修改部分
+# main
 if __name__ == '__main__':
-    # 配置
+
     config = {
         'pos_ohnd': 'seq_fold/data/pos_encoding_OH_ND.csv',
         'pos_struct': 'seq_fold/data/pos_fold.csv',
@@ -581,7 +546,6 @@ if __name__ == '__main__':
         'test_size': 0.2
     }
     
-    # 创建数据集
     dataset = RNADataset(
         config['pos_ohnd'],
         config['pos_struct'],
@@ -589,7 +553,6 @@ if __name__ == '__main__':
         config['neg_struct']
     )
     
-    # 创建交叉验证加载器和独立测试集
     cv_loaders, test_loader = create_cv_loaders(
         dataset,
         batch_size=config['batch_size'],
@@ -597,36 +560,26 @@ if __name__ == '__main__':
         test_size=config['test_size']
     )
 
-    # 初始化设备
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     print(f"Total samples: {len(dataset)}")
     print(f"Train samples: {len(dataset)*(1-config['test_size']):.0f}, Test samples: {len(dataset)*config['test_size']:.0f}")
     
-    # 存储结果
-    fold_val_results = []   # 每折在验证集上的结果
-    fold_test_results = []  # 每折在测试集上的结果
-    all_histories = []      # 训练历史
+    fold_val_results = []
+    fold_test_results = []
+    all_histories = []
     
-    # 交叉验证循环
     for fold_idx, (train_loader, val_loader) in enumerate(cv_loaders):
         print(f"\n{'='*40}")
         print(f"Starting Fold {fold_idx + 1}/{config['n_splits']}")
         print(f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
         print('='*40)
         
-        # 初始化模型
         model = CreateModel(structural_features=dataset.structural_features.shape[1]).to(device)
         
-        # 计算参数量
-        total_params = sum(p.numel() for p in model.parameters())
-        print(f"Model parameters: {total_params:,}")
-        
-        # 定义损失函数和优化器
         criterion = nn.CrossEntropyLoss()
         optimizer = optim.AdamW(model.parameters(), lr=config['lr'], weight_decay=1e-4)
         
-        # 训练当前折
         history, val_metrics = train_model_for_fold(
             model,
             train_loader,
@@ -640,32 +593,15 @@ if __name__ == '__main__':
             output_dir=config['output_dir']
         )
         
-        # 保存验证集结果
-        fold_val_results.append(val_metrics)
-        
-        # # 在独立测试集上评估
-        # print(f"\nEvaluating Fold {fold_idx} on Independent Test Set...")
-        # test_sn, test_sp, test_acc, test_f1, test_mcc, test_auroc = evaluate_model(model, test_loader, device)
-        # fold_test_results.append({
-        #     'sn': test_sn,
-        #     'sp': test_sp,
-        #     'acc': test_acc,
-        #     'f1': test_f1,
-        #     'mcc': test_mcc,
-        #     'auroc': test_auroc
-        # })
-        
+        fold_val_results.append(val_metrics)  
         all_histories.append(history)
         
-        # 清理内存
         del model, optimizer
         torch.cuda.empty_cache()
     
-    # 结果分析
     print("\n\n=== Cross-Validation Results ===")
     metrics_names = ['sn', 'sp', 'acc', 'f1', 'mcc', 'auroc']
     
-    # 验证集结果
     print("\nValidation Set Performance:")
     val_summary = {metric: [] for metric in metrics_names}
     for i, metrics in enumerate(fold_val_results):
@@ -680,38 +616,3 @@ if __name__ == '__main__':
         mean_val = np.mean(vals)
         std_val = np.std(vals)
         print(f"{metric.upper()}: {mean_val:.4f} ± {std_val:.4f}")
-    
-    # # 测试集结果
-    # print("\n\nIndependent Test Set Performance:")
-    # test_summary = {metric: [] for metric in metrics_names}
-    # for i, metrics in enumerate(fold_test_results):
-    #     print(f"\nFold {i} Model:")
-    #     for metric in metrics_names:
-    #         test_summary[metric].append(metrics[metric])
-    #         print(f"{metric.upper()}: {metrics[metric]:.4f}")
-    
-    # print("\nAverage Test Metrics:")
-    # for metric in metrics_names:
-    #     vals = test_summary[metric]
-    #     mean_val = np.mean(vals)
-    #     std_val = np.std(vals)
-    #     print(f"{metric.upper()}: {mean_val:.4f} ± {std_val:.4f}")
-    
-    # # 保存结果到CSV文件
-    # print("\nSaving results to CSV files...")
-    # os.makedirs(config['output_dir'], exist_ok=True)
-
-    # # 保存验证集结果
-    # val_df = pd.DataFrame(fold_val_results)
-    # val_df.to_csv(os.path.join(config['output_dir'], 'validation_results.csv'), index=False)
-    
-    # # 保存测试集结果
-    # test_df = pd.DataFrame(fold_test_results)
-    # test_df.to_csv(os.path.join(config['output_dir'], 'test_results.csv'), index=False)
-    
-    # # 保存历史记录
-    # for i, history in enumerate(all_histories):
-    #     hist_df = pd.DataFrame(history)
-    #     hist_df.to_csv(os.path.join(config['output_dir'], f'training_history_fold_{i}.csv'), index=False)
-
-    # print(f"Results saved to {config['output_dir']} directory.")
